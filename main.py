@@ -6,7 +6,7 @@ def main():
     if len(sys.argv) < 2:
         print("Usage: python main.py [train|test]")
         sys.exit(1)
-    
+
     mode = sys.argv[1].lower()
     if mode == "train":
         train()
