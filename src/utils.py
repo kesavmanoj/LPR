@@ -1,7 +1,9 @@
 import os
 import cv2
 import torch
+import numpy as np
 from torch.utils.data import Dataset, DataLoader, random_split
+from torchvision import transforms
 
 def parse_ccpd_filename(filename):
     """
@@ -11,134 +13,119 @@ def parse_ccpd_filename(filename):
     "0415948275862-90_83-160,417_581,529-573,528_182,521_171,414_562,421-0_0_11_14_33_33_31-32-104.jpg"
 
     Fields:
-      1. Area: Area ratio of license plate area to the entire picture area.
-      2. Tilt degree: Horizontal and vertical tilt degrees (separated by '_').
-      3. Bounding box coordinates: Coordinates of left-up and right-bottom vertices, e.g., "160,417_581,529"
-      4. Four vertices locations: (x,y) pairs for four vertices (starting from the right-bottom), e.g., "573,528_182,521_171,414_562,421"
-      5. License plate number indices: Indices for province, alphabet, and alphanumerics (e.g., "0_0_11_14_33_33_31")
-      6. Brightness: Brightness of the license plate region.
-      7. Blurriness: Blurriness of the license plate region.
+      1. Area ratio (not used for regression here)
+      2. Tilt degree (not used here)
+      3. Bounding box coordinates (not used here)
+      4. Four vertices locations: 8 numbers, in order [x1, y1, x2, y2, x3, y3, x4, y4]
+      5. License plate number indices (not used here)
+      6. Brightness (not used)
+      7. Blurriness (not used)
     """
     base = os.path.splitext(filename)[0]
     fields = base.split('-')
     if len(fields) != 7:
         raise ValueError(f"Expected 7 fields in filename, got {len(fields)}: {filename}")
 
-    # Field 1: Area (convert to float and divide by 100)
-    area_str = fields[0]
-    area_ratio = float(area_str) / 100.0
-
-    # Field 2: Tilt degree (expects two numbers separated by '_')
-    tilt_parts = fields[1].split('_')
-    if len(tilt_parts) != 2:
-        raise ValueError(f"Expected 2 tilt values, got {len(tilt_parts)}: {fields[1]}")
-    tilt_degree = tuple(map(int, tilt_parts))
-
-    # Field 3: Bounding box coordinates
-    bbox_str = fields[2].replace(',', '_')
-    bbox_parts = bbox_str.split('_')
-    if len(bbox_parts) != 4:
-        raise ValueError(f"Expected 4 bounding box values, got {len(bbox_parts)}: {bbox_str}")
-    bbox = tuple(map(int, bbox_parts))
-
-    # Field 4: Four vertices locations
+    # Field 4: Four vertices locations (e.g., "573,528_182,521_171,414_562,421")
     vertices_str = fields[3].replace(',', '_')
     vertices_parts = vertices_str.split('_')
     if len(vertices_parts) != 8:
         raise ValueError(f"Expected 8 vertex values, got {len(vertices_parts)}: {vertices_str}")
-    vertices = tuple(map(int, vertices_parts))
-
-    # Field 5: License plate number indices
-    plate_indices = list(map(int, fields[4].split('_')))
-    if len(plate_indices) != 7:
-        raise ValueError(f"Expected 7 indices for license plate, got {len(plate_indices)}: {fields[4]}")
-    
-    # Lookup arrays
-    provinces = ["皖", "沪", "津", "渝", "冀", "晋", "蒙", "辽", "吉", "黑", 
-                 "苏", "浙", "京", "闽", "赣", "鲁", "豫", "鄂", "湘", "粤", 
-                 "桂", "琼", "川", "贵", "云", "藏", "陕", "甘", "青", "宁", 
-                 "新", "警", "学", "O"]
-    alphabets = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 
-                 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'O']
-    ads = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 
-           'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 
-           '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'O']
-
-    # Decode license plate: first two indices select province and alphabet,
-    # remaining five select from ads.
-    plate_number = provinces[plate_indices[0]] + alphabets[plate_indices[1]] + \
-                   ''.join(ads[i] for i in plate_indices[2:])
-
-    # Field 6: Brightness
-    brightness = int(fields[5])
-
-    # Field 7: Blurriness
-    blurriness = int(fields[6])
+    vertices = [int(v) for v in vertices_parts]
 
     return {
-        "area_ratio": area_ratio,
-        "tilt_degree": tilt_degree,
-        "bounding_box": bbox,
-        "vertices": vertices,
-        "plate_number": plate_number,
-        "plate_indices": plate_indices,  # Actual target indices
-        "brightness": brightness,
-        "blurriness": blurriness
+        "vertices": vertices  # absolute coordinates from the original image
     }
+
+# We'll use data augmentation transforms for training.
+# For regression, we usually want to apply the same geometric transforms to both the image and the coordinates.
+# For simplicity, here we perform only a basic resizing and conversion to tensor in the transform.
+# (In a production system you might want to write a custom transform that applies the same random flip/rotation to the coordinates.)
+basic_transform = transforms.Compose([
+    transforms.ToPILImage(),
+    # Here you could add additional transforms (e.g. RandomHorizontalFlip, ColorJitter, RandomRotation)
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
 
 class CCPDDataset(Dataset):
     """
-    PyTorch Dataset for CCPD images.
-
-    Args:
-        root_dir (str): Directory containing the CCPD images.
-        transform (callable, optional): Transformations to apply to images.
-        max_images (int, optional): Limit number of images for debugging.
+    PyTorch Dataset for CCPD images, for corner regression.
+    For each image, we read the image, resize it to a fixed size,
+    and compute the ground truth corner coordinates (rescaled accordingly).
     """
-    def __init__(self, root_dir, transform=None, max_images=None):
+    def __init__(self, root_dir, target_size=(256, 64), transform=None, max_images=None):
+        """
+        Args:
+            root_dir (str): Directory containing CCPD images.
+            target_size (tuple): (width, height) for resizing images.
+            transform (callable, optional): Transform to apply to the image.
+            max_images (int, optional): Limit the number of images.
+        """
         self.root_dir = root_dir
+        self.target_size = target_size  # (width, height)
         self.transform = transform
-        self.image_paths = [
-            os.path.join(root_dir, fname)
-            for fname in os.listdir(root_dir)
-            if fname.endswith('.jpg')
-        ]
+        self.image_paths = [os.path.join(root_dir, fname)
+                            for fname in os.listdir(root_dir) if fname.endswith('.jpg')]
         if max_images is not None:
             self.image_paths = self.image_paths[:max_images]
-
+    
     def __len__(self):
         return len(self.image_paths)
-
+    
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
+        # Load image in BGR (OpenCV default)
         image = cv2.imread(image_path)
         if image is None:
             raise FileNotFoundError(f"Image not found: {image_path}")
+        orig_h, orig_w = image.shape[:2]
+        # Convert to RGB
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        # Resize image to expected dimensions (256x64: width x height)
-        image = cv2.resize(image, (256, 64))
-
+        # Parse metadata to get original corner coordinates
         metadata = parse_ccpd_filename(os.path.basename(image_path))
+        gt_vertices = metadata["vertices"]  # list of 8 integers
+
+        # Resize image to target_size (width, height)
+        target_w, target_h = self.target_size
+        image_resized = cv2.resize(image, (target_w, target_h))
+        
+        # Compute scale factors to adjust the coordinates
+        scale_x = target_w / orig_w
+        scale_y = target_h / orig_h
+        # Rescale ground truth vertices
+        gt_vertices_resized = []
+        for i, v in enumerate(gt_vertices):
+            if i % 2 == 0:  # x coordinate
+                gt_vertices_resized.append(v * scale_x)
+            else:           # y coordinate
+                gt_vertices_resized.append(v * scale_y)
+        
+        # Optionally apply transform to image (the transform expects a PIL image, so we apply it on image_resized)
+        if self.transform:
+            image_transformed = self.transform(image_resized)
+        else:
+            # Convert image_resized to tensor if no transform provided
+            image_transformed = torch.from_numpy(image_resized).permute(2, 0, 1).float() / 255.0
+
         sample = {
-            "image": image,
-            "metadata": metadata,
+            "image": image_transformed,   # Tensor shape: [3, target_h, target_w]
+            "vertices": torch.tensor(gt_vertices_resized, dtype=torch.float32),  # shape: [8]
             "filename": os.path.basename(image_path)
         }
-        if self.transform:
-            sample["image"] = self.transform(sample["image"])
-
         return sample
 
 def custom_collate_fn(batch):
-    """Custom collate function that returns a list of sample dictionaries."""
+    """Return a list of sample dictionaries."""
     return batch
 
 def load_data():
     """
-    Loads the CCPD dataset and returns DataLoaders for training and validation.
+    Loads the CCPD dataset for corner regression and returns train and validation DataLoaders.
     """
     dataset_path = "/content/LPR-Project/dataset/ccpd-preprocess/CCPD2019/ccpd_base"
-    dataset = CCPDDataset(dataset_path, max_images=4000)
+    dataset = CCPDDataset(dataset_path, target_size=(256, 64), transform=basic_transform, max_images=4000)
     
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
@@ -146,15 +133,12 @@ def load_data():
     
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
-    
     return train_loader, val_loader
 
-# For quick testing:
 if __name__ == "__main__":
+    # Quick test: print one batch's filenames and ground truth vertices.
     train_loader, _ = load_data()
     for batch in train_loader:
         print("Filenames in batch:", [sample["filename"] for sample in batch])
-        print("Metadata for first sample:")
-        for key, value in batch[0]["metadata"].items():
-            print(f"  {key}: {value}")
+        print("Ground truth vertices for first sample:", batch[0]["vertices"])
         break
