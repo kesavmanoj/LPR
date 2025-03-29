@@ -1,6 +1,7 @@
 import sys
 from src.train_corner import train as train_corner
-from src.test_corner import test as test_corner
+from src.test_corner import test_and_save_csv as test_corner
+
 
 def main():
     if len(sys.argv) < 2:
