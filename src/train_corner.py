@@ -15,7 +15,7 @@ def train():
     criterion = nn.SmoothL1Loss()
     optimizer = optim.Adam(model.parameters(), lr=5e-5)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
-    num_epochs = 15
+    num_epochs = 20
 
     checkpoint_dir = "../model"
     os.makedirs(checkpoint_dir, exist_ok=True)

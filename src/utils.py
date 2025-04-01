@@ -125,7 +125,7 @@ def load_data():
     Loads the CCPD dataset for corner regression and returns train and validation DataLoaders.
     """
     dataset_path = "/content/LPR-Project/dataset/ccpd-preprocess/CCPD2019/ccpd_base"
-    dataset = CCPDDataset(dataset_path, target_size=(256, 64), transform=basic_transform, max_images=4000)
+    dataset = CCPDDataset(dataset_path, target_size=(256, 64), transform=basic_transform, max_images=10000)
     
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
